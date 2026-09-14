@@ -60,8 +60,15 @@ public:
    * Monte Carlo physics codes generally samples the origin points based on the
    * users' choice and physics is involved in it. PUMI-Tally always needs to
    * know which mesh element they are currently in. Therefore, an initial search
-   * is done to find the starting position of the particles. This can be only
-   * called once after the source initialization.
+   * is done to find the starting position of the particles. Nothing is tallied
+   * during this search.
+   *
+   * @note Call this once for every new set of source particles, i.e. at the
+   * start of every batch (and of every in flight sub iteration of a batch),
+   * not only once at the start of the simulation. Otherwise the particles of
+   * the following batches are tracked from wherever the previous batch left
+   * them and the track lengths of their first step are tallied into the wrong
+   * elements.
    */
   void CopyInitialPosition(double *init_particle_positions,
                            std::int32_t size) const;
@@ -89,8 +96,51 @@ public:
                           double *weights, int32_t size) const;
 
   /**
+   * @brief Close the current batch and fold it into the running statistics
+   *
+   * @param normalization_factor Factor the raw batch tally is scaled with
+   * before it is accumulated, for example
+   * `total_source / (n_particles * gen_per_batch)` in OpenMC. Pass 1.0 if the
+   * physics code does not normalize its tallies.
+   *
+   * @details
+   * PUMI-Tally keeps a per-batch flux accumulator that holds
+   * `sum(track_length * weight)` of the current batch only. This call scales it
+   * by @p normalization_factor, adds the scaled value to the sum of the fluxes
+   * and its square to the sum of the squared fluxes, and then zeroes the
+   * per-batch accumulator. Those two sums are what lets @ref WriteTallyResults
+   * report a mean and a standard deviation.
+   *
+   * @note Call it once per batch that should contribute to the result, after
+   * all the particles of that batch are done moving.
+   *
+   * @see DiscardBatchTally
+   */
+  void AccumulateBatchTally(double normalization_factor) const;
+
+  /**
+   * @brief Drop the flux tallied in the current batch
+   * @details
+   * For batches that must not contribute to the reported result, such as the
+   * inactive batches of an eigenvalue calculation. It only clears the
+   * per-batch accumulator; the statistics collected from the previous batches
+   * are kept.
+   *
+   * @see AccumulateBatchTally
+   */
+  void DiscardBatchTally() const;
+
+  /**
    * @brief Write the mesh tally to a VTK file
-   * @details Normalized by element volumes and total number of particles
+   * @details
+   * Writes the `flux` (mean over the accumulated batches) and `flux_std_dev`
+   * (standard deviation of that mean) tags, both normalized by element volume,
+   * along with the `volume` tag.
+   *
+   * @note If no batch was ever closed with @ref AccumulateBatchTally, whatever
+   * was tallied so far is reported as a single unnormalized batch, which gives
+   * the mean the previous single batch behaviour and a zero standard
+   * deviation.
    */
   void WriteTallyResults() const;
 
