@@ -131,7 +131,7 @@ public:
   void DiscardBatchTally() const;
 
   /**
-   * @brief Write the mesh tally to a VTK file
+   * @brief Write the mesh tally to VTU and Omega_h (.osh) file
    * @details
    * Writes the `flux` (mean over the accumulated batches) and `flux_std_dev`
    * (standard deviation of that mean) tags, both normalized by element volume,
