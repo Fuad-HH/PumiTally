@@ -48,6 +48,26 @@ void PumiTally::MoveToNextLocation(double *particle_origin,
   pimpl_->tally_times.total_time_to_tally += elapsed_seconds.count();
 }
 
+void PumiTally::AccumulateBatchTally(const double normalization_factor) const {
+  const auto start_time = std::chrono::steady_clock::now();
+
+  pimpl_->AccumulateBatchTally(normalization_factor);
+
+  const std::chrono::duration<double> elapsed_seconds =
+      std::chrono::steady_clock::now() - start_time;
+  pimpl_->tally_times.total_time_to_tally += elapsed_seconds.count();
+}
+
+void PumiTally::DiscardBatchTally() const {
+  const auto start_time = std::chrono::steady_clock::now();
+
+  pimpl_->DiscardBatchTally();
+
+  const std::chrono::duration<double> elapsed_seconds =
+      std::chrono::steady_clock::now() - start_time;
+  pimpl_->tally_times.total_time_to_tally += elapsed_seconds.count();
+}
+
 void PumiTally::WriteTallyResults() const {
   const auto start_time = std::chrono::steady_clock::now();
 

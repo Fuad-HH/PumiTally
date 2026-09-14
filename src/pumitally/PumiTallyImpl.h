@@ -116,21 +116,62 @@ struct ParticleAtElemBoundary {
                     const Omega_h::Write<Omega_h::LO> &ptcl_done) const;
 
   /**
-   * Normalize the flux with volume and write it in a vTK file
+   * Close out the current batch by folding it into the running statistics
+   * @param normalization_factor Factor the raw batch flux is scaled with before
+   * it is accumulated (for example
+   * `total_source / (n_particles * gen_per_batch)` in OpenMC)
+   *
+   * @details
+   * The per-batch flux accumulator @ref flux holds
+   * `sum(track_length * weight)` for every element of the current batch only.
+   * This method scales it with @p normalization_factor, adds the scaled value
+   * to @ref flux_sum and its square to @ref flux_sum_sq, bumps
+   * @ref n_realizations, and zeroes @ref flux so the next batch starts clean.
+   * One call per *active* batch is what makes the mean and the standard
+   * deviation reported by @ref FinalizeTallies meaningful.
+   *
+   * @see DiscardBatchFlux
+   */
+  void AccumulateBatchFlux(Omega_h::Real normalization_factor);
+
+  /**
+   * Throw away the flux tallied in the current batch
+   * @details Used for batches that must not contribute to the result (the
+   * inactive batches of an eigenvalue calculation, for instance). It only
+   * zeroes @ref flux; @ref flux_sum, @ref flux_sum_sq and @ref n_realizations
+   * are left untouched.
+   */
+  void DiscardBatchFlux() const;
+
+  /**
+   * Normalize the accumulated flux with volume and write mean and standard
+   * deviation in a VTK file
    * @param full_mesh Omega_h mesh to write the flux result on
    * @param filename VTK file name
    *
-   * @see normalizeFlux
+   * @details
+   * If no batch was ever accumulated (@ref n_realizations is zero) the flux
+   * tallied so far is accumulated as a single unnormalized batch first, so a
+   * single batch run still reports its flux as the mean with a zero standard
+   * deviation.
+   *
+   * @see AccumulateBatchFlux
    */
-  void FinalizeTallies(Omega_h::Mesh &full_mesh,
-                       const std::string &filename) const;
+  void FinalizeTallies(Omega_h::Mesh &full_mesh, const std::string &filename);
 
   /**
-   * Normalize flux with element volumes and number of particles
-   * @param mesh Omega_h mesh object
-   * @return Omega_h::Reals Normalized flux array
+   * Mean and standard deviation of the flux over the accumulated batches
+   * @return A pair of `{mean, std_dev}` arrays, both still to be divided by
+   * the element volumes
+   *
+   * @details
+   * `mean = flux_sum / n` and
+   * `std_dev = sqrt((flux_sum_sq / n - mean^2) / (n - 1))` with
+   * `n = n_realizations`, which is the estimator OpenMC uses for its own mesh
+   * tallies. The standard deviation is zero when a single batch was
+   * accumulated.
    */
-  Omega_h::Reals NormalizeFlux(Omega_h::Mesh &mesh) const;
+  std::pair<Omega_h::Reals, Omega_h::Reals> ComputeMeanAndStdDev() const;
 
   /**
    * Mark the tracking step as is_initial_track step
@@ -140,8 +181,13 @@ struct ParticleAtElemBoundary {
   void MarkAsInitial(bool is_initial);
 
   bool is_initial_track; //!< in is_initial_track run, flux is not tallied
-  Omega_h::Write<Omega_h::Real> flux;        //!< Flux tally array
+  Omega_h::Write<Omega_h::Real> flux;     //!< Current batch flux tally array
+  Omega_h::Write<Omega_h::Real> flux_sum; //!< Sum of the per batch fluxes
+  Omega_h::Write<Omega_h::Real>
+      flux_sum_sq; //!< Sum of the squared per batch fluxes
   Omega_h::Write<Omega_h::Real> prev_xpoint; //!< Previous intersection point
+  Omega_h::LO n_realizations =
+      0; //!< Number of batches folded into @ref flux_sum
 };
 
 /**
@@ -208,6 +254,10 @@ struct PumiTallyImpl {
   void MoveToNextLocation(double *particle_origin,
                           double *particle_destinations, int8_t *flying,
                           double *weights, Omega_h::LO size);
+
+  void AccumulateBatchTally(double normalization_factor) const;
+
+  void DiscardBatchTally() const;
 
   void WriteTallyResults();
 

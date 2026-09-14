@@ -148,9 +148,25 @@ void PumiTallyImpl::MoveToNextLocation(double *particle_origin,
 #endif
 }
 
+void PumiTallyImpl::AccumulateBatchTally(
+    const double normalization_factor) const {
+  p_pumi_particle_at_elem_boundary_handler->AccumulateBatchFlux(
+      normalization_factor);
+#ifdef PUMI_MEASURE_TIME
+  Kokkos::fence();
+#endif
+}
+
+void PumiTallyImpl::DiscardBatchTally() const {
+  p_pumi_particle_at_elem_boundary_handler->DiscardBatchFlux();
+#ifdef PUMI_MEASURE_TIME
+  Kokkos::fence();
+#endif
+}
+
 void PumiTallyImpl::WriteTallyResults() {
   p_pumi_particle_at_elem_boundary_handler->FinalizeTallies(full_mesh,
-                                                            "fluxresult.vtk");
+                                                            "fluxresult");
 #ifdef PUMI_MEASURE_TIME
   Kokkos::fence();
 #endif
@@ -288,6 +304,8 @@ void ApplyVacuumBC(const Omega_h::Mesh &mesh, PPPS *ptcls,
 ParticleAtElemBoundary::ParticleAtElemBoundary(const Omega_h::LO num_elements,
                                                const Omega_h::LO capacity)
     : is_initial_track(true), flux(num_elements, 0.0, "flux"),
+      flux_sum(num_elements, 0.0, "flux_sum"),
+      flux_sum_sq(num_elements, 0.0, "flux_sum_sq"),
       prev_xpoint(capacity * 3, 0.0, "prev_xpoint") {
   printf("[INFO] Particle handler at boundary with %d elements and %d "
          "x points size (3 * n_particles)\n",
@@ -379,40 +397,121 @@ void ParticleAtElemBoundary::EvaluateFlux(
   pumipic::parallel_for(ptcls, evaluate_flux, "flux evaluation loop");
 }
 
-Omega_h::Reals
-ParticleAtElemBoundary::NormalizeFlux(Omega_h::Mesh &mesh) const {
+void ParticleAtElemBoundary::AccumulateBatchFlux(
+    const Omega_h::Real normalization_factor) {
+  const auto flux_l = flux;
+  const auto flux_sum_l = flux_sum;
+  const auto flux_sum_sq_l = flux_sum_sq;
+
+  auto accumulate = OMEGA_H_LAMBDA(const Omega_h::LO elem_id) {
+    const Omega_h::Real value = flux_l[elem_id] * normalization_factor;
+    flux_sum_l[elem_id] += value;
+    flux_sum_sq_l[elem_id] += value * value;
+    flux_l[elem_id] = 0.0;
+  };
+  Omega_h::parallel_for(flux.size(), accumulate, "accumulate batch flux");
+
+  n_realizations++;
+}
+
+void ParticleAtElemBoundary::DiscardBatchFlux() const {
+  const auto flux_l = flux;
+  auto reset = OMEGA_H_LAMBDA(const Omega_h::LO elem_id) {
+    flux_l[elem_id] = 0.0;
+  };
+  Omega_h::parallel_for(flux.size(), reset, "reset batch flux");
+}
+
+std::pair<Omega_h::Reals, Omega_h::Reals>
+ParticleAtElemBoundary::ComputeMeanAndStdDev() const {
+  OMEGA_H_CHECK_PRINTF(n_realizations > 0,
+                       "Cannot compute statistics from %d batches\n",
+                       n_realizations);
+
+  const auto flux_sum_l = flux_sum;
+  const auto flux_sum_sq_l = flux_sum_sq;
+  const auto n = static_cast<Omega_h::Real>(n_realizations);
+
+  const Omega_h::Write<Omega_h::Real> mean(flux_sum.size(), 0.0, "flux_mean");
+  const Omega_h::Write<Omega_h::Real> std_dev(flux_sum.size(), 0.0,
+                                              "flux_std_dev");
+
+  auto compute_statistics = OMEGA_H_LAMBDA(const Omega_h::LO elem_id) {
+    const Omega_h::Real elem_mean = flux_sum_l[elem_id] / n;
+    mean[elem_id] = elem_mean;
+    // a single realization gives no estimate of the spread
+    if (n > 1.0) {
+      const Omega_h::Real variance =
+          (flux_sum_sq_l[elem_id] / n - elem_mean * elem_mean) / (n - 1.0);
+      // round off can make the variance slightly negative for a flat tally
+      std_dev[elem_id] = (variance > 0.0) ? Kokkos::sqrt(variance) : 0.0;
+    }
+  };
+  Omega_h::parallel_for(flux_sum.size(), compute_statistics,
+                        "compute flux mean and std dev");
+
+  return {Omega_h::Reals(mean), Omega_h::Reals(std_dev)};
+}
+
+Omega_h::Reals ElementVolumes(Omega_h::Mesh &mesh) {
   const auto &el2n = mesh.ask_down(Omega_h::REGION, Omega_h::VERT).ab2b;
   const auto &coords = mesh.coords();
-  const auto flux_l = flux;
 
-  const Omega_h::Write<Omega_h::Real> tet_volumes(flux.size(), -1.0,
+  const Omega_h::Write<Omega_h::Real> tet_volumes(mesh.nelems(), -1.0,
                                                   "tet_volumes");
-  const Omega_h::Write<Omega_h::Real> normalized_flux(flux.size(), -1.0,
-                                                      "normalized flux");
 
-  auto normalize_flux_with_volume = OMEGA_H_LAMBDA(const Omega_h::LO elem_id) {
+  auto compute_volume = OMEGA_H_LAMBDA(const Omega_h::LO elem_id) {
     const auto elem_verts = Omega_h::gather_verts<4>(el2n, elem_id);
     const auto elem_vert_coords =
         Omega_h::gather_vectors<4, 3>(coords, elem_verts);
 
     const auto b = Omega_h::simplex_basis<3, 3>(elem_vert_coords);
-    const Omega_h::Real volume = Omega_h::simplex_size_from_basis(b);
-
-    tet_volumes[elem_id] = volume;
-    normalized_flux[elem_id] = flux_l[elem_id] / volume;
+    tet_volumes[elem_id] = Omega_h::simplex_size_from_basis(b);
   };
-  Omega_h::parallel_for(tet_volumes.size(), normalize_flux_with_volume,
-                        "normalize flux");
+  Omega_h::parallel_for(tet_volumes.size(), compute_volume,
+                        "compute element volumes");
 
-  mesh.add_tag(Omega_h::REGION, "volume", 1, Omega_h::Reals(tet_volumes));
-  return {normalized_flux};
+  return {tet_volumes};
 }
 
-void ParticleAtElemBoundary::FinalizeTallies(
-    Omega_h::Mesh &full_mesh, const std::string &filename) const {
-  const auto &normalized_flux = NormalizeFlux(full_mesh);
-  full_mesh.add_tag(Omega_h::REGION, "flux", 1, normalized_flux);
-  Omega_h::vtk::write_parallel(filename, &full_mesh, 3);
+Omega_h::Reals DivideByVolume(const Omega_h::Reals &values,
+                              const Omega_h::Reals &volumes) {
+  OMEGA_H_CHECK_PRINTF(values.size() == volumes.size(),
+                       "Cannot normalize %d values with %d volumes\n",
+                       values.size(), volumes.size());
+  const Omega_h::Write<Omega_h::Real> normalized_values(values.size(), -1.0,
+                                                        "normalized values");
+  auto normalize = OMEGA_H_LAMBDA(const Omega_h::LO elem_id) {
+    normalized_values[elem_id] = values[elem_id] / volumes[elem_id];
+  };
+  Omega_h::parallel_for(normalized_values.size(), normalize,
+                        "normalize by volume");
+  return {normalized_values};
+}
+
+void ParticleAtElemBoundary::FinalizeTallies(Omega_h::Mesh &full_mesh,
+                                             const std::string &filename) {
+  // a driver that never closes a batch still gets its raw flux reported as the
+  // mean of a single realization
+  if (n_realizations == 0) {
+    AccumulateBatchFlux(1.0);
+  }
+
+  const auto [mean, std_dev] = ComputeMeanAndStdDev();
+
+  const auto volumes = ElementVolumes(full_mesh);
+  full_mesh.add_tag(Omega_h::REGION, "volume", 1, volumes);
+
+  printf("[INFO] Writing flux mean and standard deviation of %d batches\n",
+         n_realizations);
+
+  full_mesh.add_tag(Omega_h::REGION, "flux", 1, DivideByVolume(mean, volumes));
+  full_mesh.add_tag(Omega_h::REGION, "flux_std_dev", 1,
+                    DivideByVolume(std_dev, volumes));
+
+  // Both .osh and .vtk are written. Later, .vtk will be dropped.
+  Omega_h::binary::write(filename + ".osh", &full_mesh);
+  Omega_h::vtk::write_parallel(filename + "_vtu", &full_mesh, 3);
 }
 
 void CommitParticlePositions(PPPS *ptcls) {
@@ -432,10 +531,10 @@ void CommitParticlePositions(PPPS *ptcls) {
 
 void PumiTallyImpl::SearchAndRebuild(const bool initial,
                                      const bool migrate) const {
-  // is_initial_track cannot be false when is_pumipic_initialized is false
-  // may fail if simulated more than one batch
-  assert((is_pumipic_initialized == false && initial == true) ||
-         (is_pumipic_initialized == true && initial == false));
+  // the very first search has to be an initial (non tallying) one; every later
+  // batch starts with an initial search again to locate its own source
+  // particles, so `initial` may be true any number of times after that
+  assert(is_pumipic_initialized || initial);
   p_pumi_particle_at_elem_boundary_handler->MarkAsInitial(initial);
   auto orig = pumipic_ptcls->get<0>();
   auto dest = pumipic_ptcls->get<1>();
