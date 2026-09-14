@@ -510,8 +510,8 @@ void ParticleAtElemBoundary::FinalizeTallies(Omega_h::Mesh &full_mesh,
                     DivideByVolume(std_dev, volumes));
 
   // Both .osh and .vtk are written. Later, .vtk will be dropped.
-  Omega_h::binary::write(filename+".osh", &full_mesh);
-  Omega_h::vtk::write_parallel(filename+"_vtu", &full_mesh, 3);
+  Omega_h::binary::write(filename + ".osh", &full_mesh);
+  Omega_h::vtk::write_parallel(filename + "_vtu", &full_mesh, 3);
 }
 
 void CommitParticlePositions(PPPS *ptcls) {
