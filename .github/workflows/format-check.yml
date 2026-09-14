@@ -2,9 +2,13 @@ name: Format Check
 
 on:
   push:
+    branches: [main]
   pull_request:
-  pull_request_target:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   format-check:
